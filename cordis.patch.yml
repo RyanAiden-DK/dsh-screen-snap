@@ -1,0 +1,7 @@
+# dsh-screen-snap bundle patch
+# 宿主半边：注册 /dsh-screen-snap HTTP 路由，负责「藏窗口 → 截图 → 恢复窗口」。
+# 客户端半边在 client.js，往 conversation.input.left 槽里挂一个截图按钮。
+# name 必须是实际包名，cordis 按 name import 包。
+- insert:
+    - id: dsh-screen-snap
+      name: dsh-screen-snap

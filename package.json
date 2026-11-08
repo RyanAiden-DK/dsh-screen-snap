@@ -1,0 +1,46 @@
+{
+  "name": "dsh-screen-snap",
+  "version": "0.1.0",
+  "description": "DeepSeek Harness 截图插件：输入框旁边的按钮，点一下把 DSH 藏起来、抓它下面那个窗口，图片落到工作区并把路径填进输入框。",
+  "type": "module",
+  "main": "index.js",
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "scripts/",
+    "README.md",
+    "LICENSE"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./package.json": "./package.json"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-connection"
+      ],
+      "platform": "web"
+    }
+  },
+  "keywords": [
+    "dsh-plugin",
+    "deepseek-harness",
+    "screenshot",
+    "capture",
+    "snapshot"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "os": [
+    "win32"
+  ]
+}
