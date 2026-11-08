@@ -1,80 +1,26 @@
 /**
- * dsh-screen-snap — 宿主半边。
+ * dsh-screen-snap — 宿主半边（划区截图）。
  *
- * 提供一个 HTTP 路由给客户端按钮调用：
- *   POST /dsh-screen-snap/capture
- * 流程：先按宿主进程 PID 找到 DSH 自己的窗口并藏起来 → 抓它下面那个窗口（也就是
- * 用户点按钮之前正在看的东西）→ 把窗口恢复 → 图片存成 DSH 附件并回传路径。
+ * 三个端点，全部给客户端那个相机按钮用：
+ *   POST /dsh-screen-snap/region/start  藏窗口 → 冻结整块虚拟屏幕 → 恢复窗口，返回几何信息
+ *   GET  /dsh-screen-snap/region/frame  把刚才那张冻结图给前端（前端铺在浮层当画布）
+ *   POST /dsh-screen-snap/region/end    把窗口恢复回来（确认或取消时调）
  *
  * 为什么必须「先藏再抓」：按钮在 DSH 里，点下去的那一刻 DSH 就是前台窗口，
- * 直接抓前台只能抓到自己。hide → capture → restore 是这个交互唯一的正解，
- * 代价是屏幕闪一下。
+ * 直接抓屏只能抓到自己。藏 → 抓 → 恢复是这个交互唯一的正解，代价是屏幕闪一下。
+ *
+ * 为什么全屏由客户端调 requestFullscreen：浮层只能画在 DSH 窗口里，窗口必须铺满
+ * 屏幕，用户在选区里拖框才有意义；浏览器全屏在用户手势里调用最稳，也省掉我们在
+ * 宿主侧管窗口状态（放大/还原容易和用户自己的窗口布局打架）。
  */
 import { execFile } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import path from 'node:path'
-import os from 'node:os'
 
-const SCRIPT = fileURLToPath(new URL('./scripts/shot.ps1', import.meta.url))
+const REGION = fileURLToPath(new URL('./scripts/region.ps1', import.meta.url))
 const ROUTE = '/dsh-screen-snap'
 const PS = 'powershell.exe'
 
-/** 从 PNG 的 IHDR 里读宽高，不引第三方依赖。 */
-function pngSize(buf) {
-  if (buf.length > 24 && buf.readUInt32BE(12) === 0x49484452) {
-    return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) }
-  }
-  return { width: 0, height: 0 }
-}
-
-function runCapture(hidePid) {
-  const outDir = path.join(os.tmpdir(), 'dsh-screen-snap')
-  const args = [
-    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT,
-    '-Mode', 'behind', '-OutDir', outDir, '-HidePid', String(hidePid),
-  ]
-  return new Promise((resolve, reject) => {
-    execFile(PS, args, { windowsHide: true, timeout: 15000 }, (err, stdout, stderr) => {
-      if (err) {
-        reject(new Error(String(stderr || err.message || '').trim() || 'capture failed'))
-        return
-      }
-      const file = String(stdout).trim().split(/\r?\n/).filter(Boolean).pop()
-      if (!file) {
-        reject(new Error('capture produced no file path'))
-        return
-      }
-      resolve(file)
-    })
-  })
-}
-
-async function capture(hidePid) {
-  // 宿主 PID 不一定就是窗口所属进程，按 PID 找不到时退回按标题匹配。
-  try {
-    return await runCapture(hidePid)
-  } catch (first) {
-    const outDir = path.join(os.tmpdir(), 'dsh-screen-snap')
-    const args = [
-      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', SCRIPT,
-      '-Mode', 'behind', '-OutDir', outDir, '-HideTitleLike', 'DeepSeek Harness',
-    ]
-    const file = await new Promise((resolve, reject) => {
-      execFile(PS, args, { windowsHide: true, timeout: 15000 }, (err, stdout, stderr) => {
-        if (err) {
-          reject(new Error(String(stderr || first.message || '').trim()))
-          return
-        }
-        resolve(String(stdout).trim().split(/\r?\n/).filter(Boolean).pop())
-      })
-    })
-    if (!file) throw first
-    return file
-  }
-}
-
-const REGION = fileURLToPath(new URL('./scripts/region.ps1', import.meta.url))
 let lastFramePath = null
 
 /** 跑一次 region.ps1，只认它以 @@ 开头的那行 JSON。 */
@@ -107,7 +53,7 @@ function readJsonBody(req) {
   })
 }
 
-export const inject = ['webServer', 'attachments']
+export const inject = ['webServer']
 
 export function apply(ctx) {
   const webServer = ctx.webServer ?? ctx.get('webServer')
@@ -128,8 +74,6 @@ export function apply(ctx) {
         })
         res.end(JSON.stringify(body))
       }
-
-      // ---- 划区截图的三个端点 ----
 
       if (url.pathname === `${ROUTE}/region/start` && req.method === 'POST') {
         try {
@@ -173,40 +117,13 @@ export function apply(ctx) {
           ])
           json(200, { ok: true })
         } catch (e) {
+          // 恢复失败不该让前端卡在浮层里，照样回 200，把原因带上
           json(200, { ok: false, error: String((e && e.message) || e) })
         }
         return
       }
 
-      if (req.method !== 'POST' || url.pathname !== `${ROUTE}/capture`) {
-        json(404, { ok: false, error: 'not found' })
-        return
-      }
-
-      try {
-        const file = await capture(process.pid)
-        const buf = await readFile(file)
-        const { width, height } = pngSize(buf)
-
-        let attachment = null
-        const store = ctx.get('attachments')
-        if (store && typeof store.saveImage === 'function') {
-          try {
-            attachment = await store.saveImage({
-              data: buf,
-              mediaType: 'image/png',
-              name: path.basename(file),
-            })
-          } catch (e) {
-            // 附件存不进去不该让整个截图失败，路径照样能用
-            console.warn('[dsh-screen-snap] saveImage 失败：', e && e.message)
-          }
-        }
-
-        json(200, { ok: true, path: file, width, height, attachment })
-      } catch (e) {
-        json(500, { ok: false, error: String((e && e.message) || e) })
-      }
+      json(404, { ok: false, error: 'not found' })
     },
   }))
 }
