@@ -74,6 +74,39 @@ async function capture(hidePid) {
   }
 }
 
+const REGION = fileURLToPath(new URL('./scripts/region.ps1', import.meta.url))
+let lastFramePath = null
+
+/** 跑一次 region.ps1，只认它以 @@ 开头的那行 JSON。 */
+function runRegion(args) {
+  return new Promise((resolve, reject) => {
+    execFile(PS, ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', REGION, ...args],
+      { windowsHide: true, timeout: 20000 }, (err, stdout, stderr) => {
+        const line = String(stdout || '').split(/\r?\n/).find((l) => l.startsWith('@@'))
+        if (!line) {
+          reject(new Error(String(stderr || (err && err.message) || 'region script failed').trim()))
+          return
+        }
+        try {
+          resolve(JSON.parse(line.slice(2)))
+        } catch (e) {
+          reject(new Error(`region script returned bad json: ${line.slice(0, 200)}`))
+        }
+      })
+  })
+}
+
+function readJsonBody(req) {
+  return new Promise((resolve) => {
+    let raw = ''
+    req.on('data', (chunk) => { raw += chunk; if (raw.length > 1e6) req.destroy() })
+    req.on('end', () => {
+      try { resolve(raw ? JSON.parse(raw) : {}) } catch (e) { resolve({}) }
+    })
+    req.on('error', () => resolve({}))
+  })
+}
+
 export const inject = ['webServer', 'attachments']
 
 export function apply(ctx) {
@@ -94,6 +127,55 @@ export function apply(ctx) {
           'Cache-Control': 'no-store',
         })
         res.end(JSON.stringify(body))
+      }
+
+      // ---- 划区截图的三个端点 ----
+
+      if (url.pathname === `${ROUTE}/region/start` && req.method === 'POST') {
+        try {
+          const r = await runRegion(['-Mode', 'frame', '-HidePid', String(process.pid)])
+          if (!r.ok) throw new Error(r.error || 'frame failed')
+          lastFramePath = r.path
+          json(200, {
+            ok: true,
+            vsx: r.vsx, vsy: r.vsy, vsw: r.vsw, vsh: r.vsh,
+            wasMax: r.wasMax === 1 || r.wasMax === true,
+          })
+        } catch (e) {
+          json(500, { ok: false, error: String((e && e.message) || e) })
+        }
+        return
+      }
+
+      if (url.pathname === `${ROUTE}/region/frame`) {
+        try {
+          if (!lastFramePath) throw new Error('no frame')
+          const buf = await readFile(lastFramePath)
+          res.writeHead(200, {
+            'Content-Type': 'image/png',
+            'Content-Length': String(buf.length),
+            'Cache-Control': 'no-store',
+          })
+          res.end(buf)
+        } catch (e) {
+          json(404, { ok: false, error: String((e && e.message) || e) })
+        }
+        return
+      }
+
+      if (url.pathname === `${ROUTE}/region/end` && req.method === 'POST') {
+        const body = await readJsonBody(req)
+        try {
+          await runRegion([
+            '-Mode', 'restore',
+            '-HidePid', String(process.pid),
+            '-WasMax', body && body.wasMax ? '1' : '0',
+          ])
+          json(200, { ok: true })
+        } catch (e) {
+          json(200, { ok: false, error: String((e && e.message) || e) })
+        }
+        return
       }
 
       if (req.method !== 'POST' || url.pathname !== `${ROUTE}/capture`) {
